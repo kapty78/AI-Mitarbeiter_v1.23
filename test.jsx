@@ -1,0 +1,1 @@
+"use client"; const Test = () => { const messages = [{ id: 1, content: "Test" }]; return ( <div> {messages.map((message) => ( <div key={message.id}> <p>{message.content}</p> </div> ))} </div> ); }; export default Test;

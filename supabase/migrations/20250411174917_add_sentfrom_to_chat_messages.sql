@@ -1,0 +1,1 @@
+-- Add sentfrom column to chat_messages to store user name\n\nALTER TABLE chat_messages ADD COLUMN sentfrom TEXT;

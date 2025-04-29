@@ -1,0 +1,2213 @@
+"use client"
+
+import React from "react"
+import { createClientComponentClient } from "@supabase/auth-helpers-nextjs"
+import { useEffect, useRef, useState, useMemo, useCallback } from "react"
+import { useSearchParams } from "next/navigation"
+import Link from "next/link"
+import {
+  ChevronLeft,
+  Menu,
+  Plus,
+  Send,
+  ChevronDown,
+  Copy,
+  RotateCcw,
+  Edit,
+  Paperclip,
+  Image,
+  Search,
+  MoreVertical,
+  Trash,
+  X,
+  FlaskConical,
+  MoreHorizontal,
+  Mic,
+  Loader,
+  FileText,
+  FileDown,
+  BookOpen,
+  User,
+  Settings,
+  Home,
+  ChevronRight,
+  MessageCircle,
+  Sparkles,
+  Check
+} from "lucide-react" // Added Icons
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
+import { v4 as uuidv4 } from "uuid"
+import { TypewriterEffect } from "@/components/typewriter-effect"
+import { RevealEffect } from "@/components/reveal-effect"; // Import RevealEffect
+import { useRouter } from "next/navigation"
+import { cn } from "@/lib/utils"
+import Joyride, { Step, CallBackProps, STATUS } from "react-joyride" // Import Joyride
+import dynamic from "next/dynamic" // Import dynamic
+import {
+  performSerpApiSearch,
+  formatSearchResults,
+  formatSearchResultsForAI
+} from "../utils/serpApi"
+import { downloadChatAsPdf } from "../utils/pdfExport"
+import { generateChatSummary } from "../utils/chatSummary"
+import ExportModal from "../components/ExportModal"
+import SummaryModal from "../components/SummaryModal"
+// Drag-and-Drop-Bibliotheken
+import {
+  DndContext,
+  useDraggable,
+  useDroppable,
+  useSensors,
+  useSensor,
+  PointerSensor
+} from "@dnd-kit/core"
+import LoadingIndicator from "@/components/LoadingIndicator" // Corrected import path
+import SettingsModal from "@/app/components/SettingsModal" // Import the SettingsModal component
+import { KnowledgeBaseSelector } from "@/components/knowledge/KnowledgeBaseSelector"
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter"
+import { oneDark } from "react-syntax-highlighter/dist/cjs/styles/prism"
+import { MessageMarkdown } from "@/components/message-markdown"
+import { MessageCodeBlock } from "@/components/message-code-block"
+import { buildPrompt, DEFAULT_SYSTEM_PROMPT } from "@/lib/prompt-builder"
+
+// Dynamically import Joyride with SSR disabled
+const DynamicJoyride = dynamic(() => import("react-joyride"), { ssr: false })
+
+// Define a simpler interface for CodeProps
+interface CodeProps {
+  node?: any
+  inline?: boolean
+  className?: string
+  children?: React.ReactNode
+}
+
+interface Message {
+  id: string
+  role: "user" | "assistant" | "system"
+  content: string
+  timestamp: Date
+  isTypewriting?: boolean
+  user_id?: string // Add user_id to track message sender
+  sentfrom?: string // Add sentfrom to store user name directly
+}
+
+interface ChatSession {
+  id: string
+  name: string
+  created_at: string
+  description?: string
+  project_id?: string | null
+  last_message_timestamp?: string
+  user_id?: string
+}
+
+interface Task {
+  id: string
+  title: string
+  description: string
+  system_prompt: string
+  ai_model: string
+  created_at?: string
+  updated_at?: string
+  user_id?: string
+  workspace_id?: string | null
+  project_id?: string | null
+}
+
+interface Project {
+  id: string
+  name: string
+  description?: string
+  user_id: string
+  workspace_id?: string | null
+  chats?: ChatSession[] // Chats, die zu diesem Projekt gehören
+}
+
+// Define structure for info items (used for buttons, tour content can be different)
+interface InfoItem {
+  title: string
+  // We'll define tour steps separately now
+}
+
+// Keep infoItems simple for the buttons
+const infoItems: InfoItem[] = [
+  { title: "Tasks nutzen" },
+  { title: "KI-Modell wechseln" },
+  { title: "Nachrichten bearbeiten & neu generieren" },
+  { title: "Chats verwalten" }
+]
+
+const initialMessages: Message[] = []
+
+// Define Tour Steps (Adjust step 3)
+const tourSteps: Step[] = [
+  {
+    target: "#task-select-button",
+    content: (
+      <>
+        <p className="mb-2">
+          Mit Tasks können Sie der KI spezifische Anweisungen oder eine
+          bestimmte Rolle für den gesamten Chat zuweisen.
+        </p>
+        <p>
+          Klicken Sie hier, um einen vorhandenen Task zu wählen oder einen neuen
+          zu erstellen. Tasks überschreiben die manuelle Modellauswahl.
+        </p>
+      </>
+    ),
+    placement: "bottom-end",
+    title: "Tasks nutzen"
+  },
+  {
+    target: "#model-select-button",
+    content: (
+      <>
+        <p className="mb-2 text-sm">
+          Wählen Sie hier das KI-Modell, wenn kein Task aktiv ist:
+        </p>
+        <ul className="mb-2 ml-4 list-inside list-disc space-y-1 text-sm">
+          <li>
+            <strong>Basic (GPT-4o):</strong> Ausgewogen.
+          </li>
+          <li>
+            <strong>Fast (GPT-4o mini):</strong> Schnell & Günstig.
+          </li>
+          <li>
+            <strong>Reason (GPT-4 Vision):</strong> Leistungsstark.
+          </li>
+        </ul>
+      </>
+    ),
+    placement: "bottom-end",
+    title: "KI-Modell wechseln"
+  },
+  {
+    target: "#chat-sidebar",
+    content:
+      "Hier verwalten Sie Ihre Chats: Neuen Chat erstellen (+), Chat auswählen, umbenennen oder löschen (über die drei Punkte).",
+    placement: "right",
+    title: "Chats verwalten"
+  },
+  {
+    target: "#new-chat-button",
+    content: "Klicken Sie hier, um einen neuen, leeren Chat zu beginnen.",
+    placement: "left",
+    title: "Neuer Chat",
+    disableScrolling: true,
+    disableOverlayClose: true,
+    spotlightPadding: 5
+  },
+  {
+    target: "#chat-input-textarea",
+    content:
+      "Geben Sie hier Ihre Nachricht ein und drücken Sie Enter oder klicken Sie auf den Senden-Button.",
+    placement: "top",
+    title: "Nachricht senden"
+  }
+]
+
+// Helper function to fix the columns handling consistently
+const getColumnNames = (columns: any[] | null): string[] => {
+  return columns
+    ? columns.map((col: { column_name: string }) => col.column_name)
+    : []
+}
+
+// Detect and format HTML code
+const formatCodeInMessage = (content: string): string => {
+  // If content already has markdown code blocks, don't modify
+  if (content.includes("```")) return content;
+  
+  // Check if the content appears to be HTML
+  if (
+    content.trim().startsWith("<") && 
+    (content.includes("<!DOCTYPE") || 
+     content.includes("<html") ||
+     (content.includes("<body") && content.includes("</body>")) ||
+     (content.includes("<head") && content.includes("</head>")))
+  ) {
+    return "```html\n" + content + "\n```";
+  }
+  
+  return content;
+};
+
+// This is a standalone component for code blocks
+
+// ---> HILFSFUNKTIONEN für V2 Prompt <--- 
+function trimText(txt: string | null | undefined, maxWords = 60): string {
+  if (!txt) return "";
+  const words = txt.trim().split(/\s+/);
+  if (words.length <= maxWords) return txt;
+  return words.slice(0, maxWords).join(" ") + " …";
+}
+
+// V2 System Prompt Definition - entfernt, da jetzt zentral in prompt-builder.ts definiert
+// const systemPrompt = `...`.trim();
+// ---> ENDE HILFSFUNKTIONEN für V2 Prompt <--- 
+
+// Add debugging flag at the top of the file, after imports
+const DEBUG_MODE = false; // Set to true to enable verbose logging
+
+// Replace console.log with debug-aware logging function
+const debugLog = (...args: any[]) => {
+  if (DEBUG_MODE) {
+    console.log(...args);
+  }
+};
+
+// Add this custom hook for subscription management
+// Place it outside the component, before export default function Chat()
+const useSubscriptions = (supabase: any) => {
+  const chatsChannelRef = useRef<any>(null);
+  const messagesChannelRef = useRef<any>(null);
+  const [subscriptionStatus, setSubscriptionStatus] = useState({
+    chatsSubscribed: false,
+    messagesSubscribed: false
+  });
+
+  // Setup chat subscription
+  const setupChatSubscription = useCallback((userId: string) => {
+    if (!supabase || !userId || chatsChannelRef.current) {
+      return;
+    }
+
+    const channelId = `chats_updates_global`;
+    debugLog(`Setting up realtime subscription for chats table: ${channelId}`);
+
+    const chatsChannel = supabase
+      .channel(channelId)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "chats"
+        },
+        (payload: any) => {
+          debugLog("Realtime chat update received:", payload);
+          // Callback to update UI based on the payload would be passed
+          // from the component when calling this function
+        }
+      )
+      .subscribe((status: string) => {
+        debugLog(`Subscription status for ${channelId}: ${status}`);
+        setSubscriptionStatus(prev => ({...prev, chatsSubscribed: status === "SUBSCRIBED"}));
+      });
+    
+    chatsChannelRef.current = chatsChannel;
+    return chatsChannel;
+  }, [supabase]);
+
+  // Setup message subscription
+  const setupMessageSubscription = useCallback((chatId: string, userId: string, onMessageReceived: (msg: any) => void) => {
+    if (!supabase || !chatId || !userId) {
+      return;
+    }
+
+    // Cleanup previous subscription if exists
+    if (messagesChannelRef.current) {
+      debugLog("Cleaning up previous message subscription");
+      supabase.removeChannel(messagesChannelRef.current);
+      messagesChannelRef.current = null;
+    }
+
+    const channelId = `chat_messages_${chatId}`;
+    debugLog(`Setting up message subscription for chat: ${chatId}`);
+
+    const messagesChannel = supabase
+      .channel(channelId)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "chat_messages",
+          filter: `chat_id=eq.${chatId}`
+        },
+        (payload: any) => {
+          debugLog(`Realtime message update received for chat ${chatId}:`, payload.eventType);
+          
+          if (payload.eventType === "INSERT") {
+            const newMsg = payload.new;
+            // Check if message is from another user
+            const msgSentByOtherUser = newMsg.user_id && newMsg.user_id !== userId;
+            
+            // Only notify if message is from another user or pass to the callback in any case
+            onMessageReceived(payload);
+          }
+        }
+      )
+      .subscribe((status: string) => {
+        debugLog(`Message subscription status for ${channelId}: ${status}`);
+        setSubscriptionStatus(prev => ({...prev, messagesSubscribed: status === "SUBSCRIBED"}));
+      });
+
+    messagesChannelRef.current = messagesChannel;
+    return messagesChannel;
+  }, [supabase]);
+
+  // Cleanup all subscriptions
+  const cleanupSubscriptions = useCallback(() => {
+    if (chatsChannelRef.current && supabase) {
+      debugLog("Cleaning up chats table subscription");
+      supabase.removeChannel(chatsChannelRef.current);
+      chatsChannelRef.current = null;
+    }
+
+    if (messagesChannelRef.current && supabase) {
+      debugLog("Cleaning up message subscription");
+      supabase.removeChannel(messagesChannelRef.current);
+      messagesChannelRef.current = null;
+    }
+
+    setSubscriptionStatus({
+      chatsSubscribed: false,
+      messagesSubscribed: false
+    });
+  }, [supabase]);
+
+  return {
+    setupChatSubscription,
+    setupMessageSubscription,
+    cleanupSubscriptions,
+    subscriptionStatus
+  };
+};
+
+export default function Chat() {
+  const searchParams = useSearchParams()
+  const rawWorkspaceId = searchParams.get("workspace")
+  const taskId = searchParams.get("task")
+
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [user, setUser] = useState<any>(null)
+  const [workspace, setWorkspace] = useState<any>(null)
+  const [userFullName, setUserFullName] = useState<string>("Du")
+  const [messages, setMessages] = useState<Message[]>(initialMessages)
+  const [inputValue, setInputValue] = useState("")
+  const [isTyping, setIsTyping] = useState(false)
+  const [showIceBreakers, setShowIceBreakers] = useState(false)
+  const [showModelDropdown, setShowModelDropdown] = useState(false)
+  const [selectedModel, setSelectedModel] = useState("gpt-4o")
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>([])
+  const [currentChatId, setCurrentChatId] = useState<string | null>(null)
+  const [tasks, setTasks] = useState<Task[]>([])
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null)
+  const [showTaskDropdown, setShowTaskDropdown] = useState(false)
+  const [showTaskModal, setShowTaskModal] = useState(false)
+  const [newTask, setNewTask] = useState<Task>({
+    id: "",
+    title: "",
+    description: "",
+    system_prompt: "",
+    ai_model: ""
+  })
+  const [newTaskName, setNewTaskName] = useState("")
+  const [newTaskDescription, setNewTaskDescription] = useState("")
+  const [newTaskSystemPrompt, setNewTaskSystemPrompt] = useState("")
+  const [newTaskModel, setNewTaskModel] = useState("gpt-4o")
+  const [showSidebar, setShowSidebar] = useState(true)
+  const [typingMessageId, setTypingMessageId] = useState<string | null>(null)
+  const [personalWorkspaceId, setPersonalWorkspaceId] = useState<string | null>(
+    null
+  )
+  const [previousSelectedTask, setPreviousSelectedTask] = useState<Task | null>(
+    null
+  )
+  const [previousSelectedModel, setPreviousSelectedModel] = useState<
+    string | null
+  >(null)
+  const [messageUpdatePending, setMessageUpdatePending] = useState(false)
+  const [isTaskSwitching, setIsTaskSwitching] = useState(false)
+  const [lastMessageUpdate, setLastMessageUpdate] = useState(Date.now())
+
+  // State für Projekte
+  const [projects, setProjects] = useState<Project[]>([])
+  const [selectedProject, setSelectedProject] = useState<Project | null>(null)
+  const [showProjectDropdown, setShowProjectDropdown] = useState(false)
+  const [showProjectModal, setShowProjectModal] = useState(false)
+  const [newProjectName, setNewProjectName] = useState("")
+  const [newProjectDescription, setNewProjectDescription] = useState("")
+  const [projectMenuOpen, setProjectMenuOpen] = useState<string | null>(null)
+  const [projectToRename, setProjectToRename] = useState<Project | null>(null)
+
+  // State für Drag & Drop
+  const [draggedChatId, setDraggedChatId] = useState<string | null>(null)
+  const [activeDropTarget, setActiveDropTarget] = useState<string | null>(null)
+
+  // State für aufgeklappte Projekte
+  const [expandedProjects, setExpandedProjects] = useState<
+    Record<string, boolean>
+  >({})
+
+  // State for editing messages
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
+  const [editingContent, setEditingContent] = useState("")
+  
+  // State to store original messages during editing
+  const [originalMessages, setOriginalMessages] = useState<Message[]>([])
+
+  // Add searchDebounceTimeout ref
+  const searchDebounceTimeout = useRef<any>(null)
+
+  const chatBodyRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+  const modelDropdownRef = useRef<HTMLDivElement>(null)
+  const taskDropdownRef = useRef<HTMLDivElement>(null)
+  const projectDropdownRef = useRef<HTMLDivElement>(null)
+
+  const supabase = createClientComponentClient()
+
+  // Add state for chat menu and rename functionality
+  const [chatMenuOpen, setChatMenuOpen] = useState<string | null>(null)
+  const [renameModalOpen, setRenameModalOpen] = useState(false)
+  const [chatToRename, setChatToRename] = useState<ChatSession | null>(null)
+  const [newChatName, setNewChatName] = useState("")
+  // Neuer State für inline edit
+  const [editingChatId, setEditingChatId] = useState<string | null>(null)
+
+  const router = useRouter()
+
+  // Add state and refs for the input action menu
+  const [showInputMenu, setShowInputMenu] = useState(false)
+  const inputMenuRef = useRef<HTMLDivElement>(null)
+  const moreOptionsButtonRef = useRef<HTMLButtonElement>(null)
+
+  // Füge einen Ref für die Edit-Box hinzu
+  const editBoxRef = useRef<HTMLDivElement>(null)
+
+  // Add state for the new info modal
+  // const [showInfoModal, setShowInfoModal] = useState(false)
+  // const [modalContent, setModalContent] = useState<InfoItem | null>(null)
+
+  // Add state for React Joyride
+  const [runTour, setRunTour] = useState(false)
+  const [stepIndex, setStepIndex] = useState(0)
+
+  // State to control showing fake messages during the tour
+  const [showFakeMessagesForTour, setShowFakeMessagesForTour] = useState(false)
+
+  // Define fake messages for the tour demonstration
+  const fakeTourMessages: Message[] = [
+    {
+      id: "fake-user-1",
+      role: "user",
+      content: "Das ist eine Beispiel-Nachricht des Benutzers.",
+      timestamp: new Date(Date.now() - 120000) // 2 minutes ago
+    },
+    {
+      id: "fake-ai-message",
+      role: "assistant",
+      content:
+        "Und hier ist eine Beispiel-Antwort der KI. Wenn Sie den Mauszeiger über diese Nachricht bewegen, werden Aktionsbuttons angezeigt.",
+      timestamp: new Date(Date.now() - 60000) // 1 minute ago
+    }
+  ]
+
+  // Add loading state specifically for search
+  const [isSearching, setIsSearching] = useState(false)
+  // Add chat message search state
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [messageSearchQuery, setMessageSearchQuery] = useState("")
+  const [messageSearchResults, setMessageSearchResults] = useState<any[]>([])
+
+  // New state variables for the export and summary modals
+  const [showExportModal, setShowExportModal] = useState(false)
+  const [showSummaryModal, setShowSummaryModal] = useState(false)
+  const [chatSummary, setChatSummary] = useState("")
+  const [isSummarizing, setIsSummarizing] = useState(false)
+
+  // State for showing the message actions dialog
+  const [showMessageActionsDialog, setShowMessageActionsDialog] =
+    useState(false)
+  const [isImprovingPrompt, setIsImprovingPrompt] = useState(false)
+
+  // Add the state for showing settings modal
+  const [showSettingsModal, setShowSettingsModal] = useState(false) // Add state for settings modal
+
+  // Add state for storing user names
+  const [userNamesMap, setUserNamesMap] = useState<{ [key: string]: string }>(
+    {}
+  )
+
+  // Neue State-Variable für die ausgewählte Wissensdatenbank
+  const [selectedKnowledgeBaseId, setSelectedKnowledgeBaseId] = useState<
+    string[] | null
+  >(null)
+
+  // Online-Status-State
+  const [isOnline, setIsOnline] = useState<boolean>(true); // Standardmäßig annehmen, dass wir online sind
+
+  // Korrekte Typisierung des Refs am Anfang der Komponente
+  const initialChatsLoadedRef = useRef(false);
+  const chatsChannelRef = useRef<any>(null);
+  const messagesChannelRef = useRef<any>(null);
+  const isInitializingRef = useRef(false);
+  const isStartingNewChatRef = useRef(false);
+
+  // Improved state management for initialization with proper debouncing
+  // Add this near the beginning of the component, around line 200-300
+  const initializationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const messageUpdateTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Event-Listener für Online/Offline-Status
+  useEffect(() => {
+    // Initialen Status setzen
+    setIsOnline(navigator.onLine);
+    
+    // Handler für Online/Offline-Events
+    const handleOnline = () => {
+      console.log("🟢 Internetverbindung wiederhergestellt");
+      setIsOnline(true);
+      
+      // Optional: Beim Wiederherstellen der Verbindung Daten neu laden
+      if (user) {
+        const workspaceContext = rawWorkspaceId || personalWorkspaceId || null;
+        loadChatSessionsMemoized(user.id, workspaceContext);
+        loadTasksMemoized(user.id, workspaceContext);
+        loadProjectsMemoized(user.id, workspaceContext);
+      }
+    };
+    
+    const handleOffline = () => {
+      console.log("🔴 Internetverbindung verloren");
+      setIsOnline(false);
+    };
+    
+    // Event-Listener hinzufügen
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    
+    // Event-Listener beim Unmount entfernen
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [user, rawWorkspaceId, personalWorkspaceId]);
+  
+  useEffect(() => {
+    if (selectedTask && selectedTask.ai_model) {
+      setSelectedModel(selectedTask.ai_model)
+    }
+  }, [selectedTask])
+
+  // UI-Komponente für Offline-Status 
+  const OfflineIndicator = () => {
+    if (isOnline) return null;
+    
+    return (
+      <div className="fixed bottom-4 right-4 z-50 rounded-md bg-yellow-600 px-4 py-2 text-white shadow-lg">
+        <div className="flex items-center space-x-2">
+          <div className="h-2 w-2 rounded-full bg-red-500"></div>
+          <span>Offline-Modus - Einige Funktionen sind nicht verfügbar</span>
+        </div>
+      </div>
+    );
+  };
+
+  useEffect(() => {
+    const fetchPersonalWorkspace = async () => {
+      if (user) {
+        console.log("Fetching personal workspace for user:", user.id)
+        const { data, error } = await supabase
+          .from("workspaces")
+          .select("id")
+          .eq("user_id", user.id)
+          .eq("is_home", true)
+          .single() // Annahme: Es gibt nur EINEN persönlichen Workspace
+
+        if (error && error.code !== "PGRST116") {
+          // Ignore ' esattamente uma linha esperada'
+          console.error("Error fetching personal workspace:", error)
+        } else if (data) {
+          console.log("Personal workspace found:", data.id)
+          setPersonalWorkspaceId(data.id)
+        } else {
+          console.warn("Personal workspace not found for user:", user.id)
+          // Hier könnte man optional den Workspace erstellen, falls er fehlt
+          // oder eine Fehlermeldung anzeigen.
+        }
+      }
+    }
+    if (user && !rawWorkspaceId) {
+      // Nur laden, wenn kein Workspace in URL und User bekannt
+      fetchPersonalWorkspace()
+    }
+  }, [user, supabase, rawWorkspaceId]) // Abhängigkeiten
+
+  // Optimierte Kontextauswahl mit Caching, besserer Priorisierung und Ausschluss aktueller Nachrichten
+  // Cache für Chat-Sessions um redundante Ladevorgänge zu vermeiden
+  const chatSessionsCache: {
+    sessions: any[] | null
+    timestamp: number
+    maxAge: number
+  } = {
+    sessions: null,
+    timestamp: 0,
+    maxAge: 5000 // Cache ist für 5 Sekunden gültig
+  }
+
+  // Cache für Projektberechnungen
+  const projectsCache: {
+    projectChats: Map<string, any[]> | null
+    timestamp: number
+    maxAge: number
+  } = {
+    projectChats: null,
+    timestamp: 0,
+    maxAge: 10000 // Cache ist für 10 Sekunden gültig
+  }
+
+  // Optimierte Funktion zum Laden von Chat-Sessions mit Caching
+  const loadChatSessionsWithCache = async (
+    userId: string,
+    workspaceId: string | null
+  ) => {
+    const now = Date.now()
+
+    // Prüfen, ob der Cache gültig ist
+    if (
+      chatSessionsCache.sessions &&
+      now - chatSessionsCache.timestamp < chatSessionsCache.maxAge
+    ) {
+      console.log("📦 Verwende gecachte Chat-Sessions")
+      return chatSessionsCache.sessions
+    }
+
+    console.log(
+      `🔄 Loading chat sessions - userId: ${userId} workspaceId: ${workspaceId}`
+    )
+
+    // Lade Daten wie zuvor
+    const { data, error } = await supabase
+      .from("chats")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("workspace_id", workspaceId)
+      .order("updated_at", { ascending: false })
+
+    if (error) {
+      console.error("❌ Fehler beim Laden der Chat-Sessions:", error)
+      return []
+    }
+
+    console.log(`✅ Loaded ${data.length} chat sessions`)
+
+    // Verarbeite Daten und speichere sie im Cache
+    const formattedSessions = data.map((chat: any) => ({
+      id: chat.id,
+      name: chat.name || "Neuer Chat",
+      timestamp: chat.updated_at,
+      message_count: chat.message_count || 0,
+      project: chat.project || null,
+      temperature: chat.temperature,
+      model: chat.model || null
+    }))
+
+    // Cache aktualisieren
+    chatSessionsCache.sessions = formattedSessions
+    chatSessionsCache.timestamp = now
+
+    return formattedSessions
+  }
+
+  // Optimierte Funktion zur Projektberechnung mit Caching
+  const recalculateProjectsWithCache = (chats: any[]) => {
+    const now = Date.now()
+
+    // Prüfen, ob der Cache gültig ist
+    if (
+      projectsCache.projectChats &&
+      now - projectsCache.timestamp < projectsCache.maxAge
+    ) {
+      return projectsCache.projectChats
+    }
+
+    console.log(
+      `🔢 Berechne Projekte neu aus ${chats.length} verfügbaren Chats`
+    )
+
+    const projectChats = new Map()
+
+    // Projekte berechnen wie zuvor
+    const availableProjects = [
+      ...new Set(chats.filter(c => c.project).map(c => c.project))
+    ]
+
+    availableProjects.forEach(project => {
+      const chatsInProject = chats.filter(c => c.project === project)
+      projectChats.set(project, chatsInProject)
+      console.log(`🗂️ Projekt ${project} hat ${chatsInProject.length} Chats`)
+    })
+
+    // Cache aktualisieren
+    projectsCache.projectChats = projectChats
+    projectsCache.timestamp = now
+
+    return projectChats
+  }
+
+  // Hauptfunktion für die Kontext-Suche, verbessert mit Ausschluss der aktuellen Nachricht
+  const findSimilarMessagesOptimized = async (
+    userId: string,
+    query: string,
+    currentMessageId: string | null = null
+  ) => {
+    debugLog(`🔍 Suche nach ähnlichen Nachrichten für User ${userId}`);
+    debugLog(`📝 Suchanfrage: "${query}"`);
+
+    // Skip search for very short queries to reduce database load
+    if (query.trim().length < 3) {
+      debugLog("⏩ Überspringe Suche für zu kurze Anfrage (weniger als 3 Zeichen)");
+      return [];
+    }
+
+    // Validiere userId
+    if (!userId || typeof userId !== "string" || userId.trim() === "") {
+      console.error("❌ Ungültige userId für die Suche:", userId);
+      return [];
+    }
+
+    try {
+      // Erstelle ein temporäres Nachrichtenobjekt für das Embedding
+      const tempQueryMessage = {
+        content: query,
+        id: "query", // Diese ID wird nicht in der DB gespeichert
+        role: "user" as "user", // Explizit typisieren
+        timestamp: new Date()
+      };
+
+      // Erstelle Embedding für die Anfrage
+      debugLog(`🧠 Generiere Embedding für Suchanfrage...`);
+
+      try {
+        // Direkter Aufruf der Embedding-API als temporärer Ersatz für createEmbedding
+        debugLog("📨 Original Nachrichteninhalt:", tempQueryMessage.content);
+        const currentDate = new Date().toISOString().split("T")[0];
+        const contentWithDate = `[Datum: ${currentDate}]\n${tempQueryMessage.content}`;
+        
+        const response = await fetch("/api/embeddings", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            input: contentWithDate
+          })
+        });
+        
+        if (!response.ok) {
+          throw new Error(`Embedding API responded with ${response.status}`);
+        }
+        
+        const embeddingData = await response.json();
+        const embedding = embeddingData.embedding;
+
+        if (!embedding) {
+          console.error("❌ Fehler beim Generieren des Embeddings für die Suche");
+          return [];
+        }
+
+        debugLog(`✅ Embedding für Abfrage erfolgreich generiert`);
+        debugLog(`📊 Query-Embedding-Dimensionen: ${embedding.length}`);
+        
+        // Adjust similarity threshold based on query length
+        const dynamicThreshold = query.length < 10 ? 0.75 : 0.65;
+        const maxResults = query.length < 10 ? 10 : 20;
+        
+        debugLog(
+          `📞 Rufe search_similar_messages RPC für User ${userId} auf (Schwellwert: ${dynamicThreshold}, Max Ergebnisse: ${maxResults})`
+        );
+
+        // RPC für die Ähnlichkeitssuche aufrufen
+        const { data: results, error } = await supabase.rpc(
+          "search_similar_messages",
+          {
+            p_user_id: userId,
+            query_embedding: embedding,
+            similarity_threshold: dynamicThreshold, // Use dynamic threshold
+            max_results: maxResults
+          }
+        );
+
+        if (error) {
+          console.error("❌ Fehler bei der RPC-Suche nach ähnlichen Nachrichten:", error);
+          return [];
+        }
+
+        debugLog(`🔎 RPC Ergebnis: ${results?.length || 0} Nachrichten gefunden`);
+        
+        if (!results || results.length === 0) {
+          return [];
+        }
+        
+        if (DEBUG_MODE) {
+          debugLog(`📋 Erste Ergebnisse (Rohdaten): ${JSON.stringify(results?.slice(0, 2) || [])}`);
+        }
+
+        // Filtere die aktuelle Nachricht, falls vorhanden
+        let filteredResults = results || [];
+        if (currentMessageId) {
+          const originalLength = filteredResults.length;
+          filteredResults = filteredResults.filter(
+            (msg: any) => msg.message_id !== currentMessageId
+          );
+          if (originalLength !== filteredResults.length) {
+            debugLog(`🧹 Aktuelle Nachricht mit ID ${currentMessageId} aus Ergebnissen ausgeschlossen`);
+          }
+        }
+
+        // Schnellere Verarbeitung der Datumsangaben ohne übermäßiges Logging
+        for (const msg of filteredResults) {
+          // Generiere eine anzeigbare Version des Inhalts ohne Datum
+          msg.displayContent = msg.content;
+          if (msg.content && typeof msg.content === 'string' && msg.content.startsWith('[Datum:') && msg.content.includes(']\n')) {
+            msg.displayContent = msg.content.replace(/^\[Datum:[^\]]+\]\n/, '');
+          }
+          
+          // Extrahiere Datum aus dem Nachrichteninhalt, aber logge nicht jede Nachricht
+          const dateMatch = msg.content?.match(/\[Datum: ([^\]]+)\]/);
+          msg.dateInfo = dateMatch ? dateMatch[1] : null;
+        }
+
+        debugLog(`✅ ${filteredResults.length} ähnliche Nachrichten nach Filterung gefunden`);
+
+        return filteredResults;
+      } catch (error) {
+        console.error("❌ Fehler beim Erstellen des Embeddings:", error);
+        return [];
+      }
+    } catch (error) {
+      console.error("❌ Fehler bei der Suche nach ähnlichen Nachrichten:", error);
+      return [];
+    }
+  };
+
+  // Verbesserte Kontext-Auswahlfunktion mit optimierter Bewertung für neueste/älteste Nachrichten
+  const prepareContextMessage = (contextContent: string) => {
+    return {
+      role: "system",
+      content: `Relevanter Kontext aus früheren Gesprächen:\n\n${contextContent}\n\nDies sind Ausschnitte aus vorherigen Konversationen, die für die aktuelle Frage relevant sein könnten. Die mit "neueste Information" markierten Abschnitte enthalten den aktuellsten Stand zu diesem Thema, während "erste Erwähnung" historischen Kontext bietet. Nutze diese Informationen, um eine informierte Antwort zu geben, besonders wenn der Benutzer sich auf bereits besprochene Themen bezieht.`
+    }
+  }
+
+  const loadChatSessions = async (
+    userId: string,
+    workspaceId: string | null = null
+  ) => {
+    try {
+      console.log(
+        "🔄 Loading chat sessions - userId:",
+        userId,
+        "workspaceId:",
+        workspaceId
+      )
+
+      // Verwende personalWorkspaceId als Fallback, wenn keine workspaceId übergeben wird
+      const targetWorkspaceId = workspaceId || personalWorkspaceId
+
+      // Build the query
+      let query = supabase
+        .from("chats")
+        .select(
+          "id, name, created_at, description, workspace_id, last_message_timestamp, project_id, user_id"
+        )
+
+      // Properly handle null workspace IDs
+      if (targetWorkspaceId) {
+        // Wenn ein Workspace angegeben ist, zeige ALLE Chats in diesem Workspace
+        // ohne nach user_id zu filtern
+        query = query.eq("workspace_id", targetWorkspaceId)
+      } else {
+        // Nur im persönlichen Bereich (ohne Workspace) nach user_id filtern
+        query = query.is("workspace_id", null).eq("user_id", userId)
+      }
+
+      const { data, error } = await query.order("last_message_timestamp", {
+        ascending: false
+      })
+
+      if (error) {
+        console.error("❌ Error loading chat sessions:", error)
+        setError(`Fehler beim Laden der Chats: ${error.message}`)
+        throw error
+      }
+
+      if (data) {
+        console.log("✅ Loaded", data.length, "chat sessions")
+        console.log("Chat data:", data) // Debug: Zeige die Chat-Daten
+
+        const formattedSessions = data.map((chat: any) => ({
+          id: chat.id || "",
+          name: chat.name || "Unnamed Chat",
+          created_at: chat.created_at || new Date().toISOString(),
+          last_message_timestamp: chat.last_message_timestamp,
+          user_id: chat.user_id, // Behalte user_id um den Ersteller anzuzeigen
+          ...(chat.description && { description: chat.description }),
+          project_id: chat.project_id
+        }))
+
+        console.log("Formatted sessions:", formattedSessions) // Debug: Zeige die formatierten Sessions
+        setChatSessions(formattedSessions)
+      } else {
+        console.log("ℹ️ No chat sessions found")
+        setChatSessions([])
+      }
+    } catch (err) {
+      console.error("❌ Error in loadChatSessions:", err)
+      setChatSessions([])
+    }
+  }
+
+  const createNewChat = async () => {
+    try {
+      if (!user) {
+        setError("Sie müssen angemeldet sein, um einen Chat zu erstellen.")
+        return null
+      }
+
+      // Determine the workspace ID to use - simplify this logic
+      const workspaceId = rawWorkspaceId || personalWorkspaceId
+
+      if (!workspaceId) {
+        setError(
+          "Konnte keinen gültigen Arbeitsbereich zum Erstellen des Chats finden."
+        )
+        return null
+      }
+
+      console.log(`Creating new chat in workspace: ${workspaceId}`)
+
+      // Create a new chat with a temporary name - we'll update it later
+      const newChatId = uuidv4()
+      const initialTitle = "Neuer Chat"
+
+      // Create with retry to ensure it succeeds
+      const { data: newChat, error } = await supabase
+        .from("chats")
+        .insert({
+          id: newChatId,
+          user_id: user.id,
+          name: initialTitle,
+          workspace_id: workspaceId,
+          created_at: new Date().toISOString(),
+          last_message_timestamp: new Date().toISOString()
+        })
+        .select()
+        .single()
+
+      if (error) {
+        console.error(`❌ Error creating new chat: ${error.message}`)
+        setError(`Fehler beim Erstellen des Chats: ${error.message}`)
+        return null
+      }
+
+      if (!newChat) {
+        console.error("❌ No chat data returned after creation")
+        setError("Fehler beim Erstellen des Chats: Keine Daten zurückgegeben")
+        return null
+      }
+
+      console.log(`✅ Successfully created new chat with ID: ${newChatId}`)
+
+      // Set the current chat ID immediately
+      setCurrentChatId(newChatId)
+
+      // Wait for the database to properly register the new chat
+      await new Promise(resolve => setTimeout(resolve, 300))
+
+      // Reload chat sessions to update UI
+      if (user) {
+        await loadChatSessions(user.id, workspaceId)
+      }
+
+      return newChatId
+    } catch (err) {
+      console.error("Error in createNewChat:", err)
+      setError(
+        `Fehler beim Erstellen des Chats: ${err instanceof Error ? err.message : "Unbekannter Fehler"}`
+      )
+      return null
+    }
+  }
+
+  const loadChat = async (chatId: string) => {
+    try {
+      setCurrentChatId(chatId)
+
+      // Try to get chat details first to confirm it exists
+      const { data: chatData, error: chatError } = await supabase
+        .from("chats")
+        .select("id, name")
+        .eq("id", chatId)
+        .single()
+
+      if (chatError) {
+        console.error("Error fetching chat details:", chatError)
+        return
+      }
+
+      // Get chat messages - now only using chat_id
+      const { data: messagesData, error: messagesError } = await supabase
+        .from("chat_messages")
+        .select("*")
+        .eq("chat_id", chatId)
+        .order("created_at", { ascending: true })
+
+      if (messagesError) {
+        console.error("Error fetching chat messages:", messagesError)
+        setMessages([])
+        return
+      }
+
+      if (messagesData && messagesData.length > 0) {
+        // Transform to our Message format
+        const transformedMessages = messagesData.map((msg: any) => ({
+          id: uuidv4(),
+          role: msg.role as "user" | "assistant" | "system",
+          content: msg.content,
+          timestamp: new Date(msg.created_at),
+          user_id: msg.user_id, // Store user_id from database
+          sentfrom: msg.sentfrom // Store sentfrom from database
+        }))
+
+        setMessages(transformedMessages)
+        console.log(
+          `Loaded ${transformedMessages.length} messages for chat ${chatId}`
+        )
+
+        // Fetch usernames for all unique user_ids in messages
+        const userIds = [
+          ...new Set(
+            transformedMessages
+              .filter(msg => msg.role === "user" && msg.user_id)
+              .map(msg => msg.user_id)
+          )
+        ]
+
+        if (userIds.length > 0) {
+          const { data: profilesData, error: profilesError } = await supabase
+            .from("profiles")
+            .select("id, full_name")
+            .in("id", userIds)
+
+          if (profilesError) {
+            console.error("Error fetching user profiles:", profilesError)
+          } else if (profilesData) {
+            // Create a map of user_id to full_name
+            const userNames: { [key: string]: string } = {}
+            profilesData.forEach(profile => {
+              userNames[profile.id] = profile.full_name
+            })
+            setUserNamesMap(userNames)
+          }
+        }
+      } else {
+        console.log(`No messages found for chat ${chatId}`)
+        setMessages([])
+      }
+    } catch (err) {
+      console.error("Error loading chat:", err)
+      setMessages([])
+    }
+  }
+
+  const loadTasks = async (
+    userId: string,
+    workspaceId: string | null = null
+  ) => {
+    try {
+      // Offline-Status prüfen
+      if (!navigator.onLine) {
+        console.log("Offline erkannt - Überspringe Laden der Tasks");
+        return; // Früher Abbruch bei fehlender Internetverbindung
+      }
+
+      // Timeout für die Anfrage setzen, um lange hängende Requests zu vermeiden
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 Sekunden Timeout
+
+      try {
+        let query = supabase.from("tasks").select("*");
+
+        // Workspace-Filter
+        if (workspaceId) {
+          // Wenn ein Workspace angegeben ist, zeige ALLE Tasks in diesem Workspace
+          // ohne nach user_id zu filtern
+          query = query.eq("workspace_id", workspaceId);
+        } else {
+          // Nur im persönlichen Bereich (ohne Workspace) nach user_id filtern
+          query = query.is("workspace_id", null).eq("user_id", userId);
+        }
+
+        const { data, error } = await query;
+
+        // Timeout aufräumen
+        clearTimeout(timeoutId);
+
+        if (error) throw error;
+
+        if (data) {
+          const formattedTasks = data.map(task => ({
+            ...task,
+            title: task.title || task.name,
+            ai_model: task.ai_model || task.preferred_model || "gpt-4o"
+          }));
+          setTasks(formattedTasks);
+        }
+      } catch (fetchError: any) {
+        // Timeout aufräumen, falls der Fehler vor dem Timeout auftrat
+        clearTimeout(timeoutId);
+        
+        // Prüfe, ob es sich um einen Abbruch-Fehler oder Netzwerkfehler handelt
+        if (fetchError.name === 'AbortError') {
+          console.log("Task-Loading-Anfrage abgebrochen (Timeout)");
+        } else if (fetchError.message?.includes('fetch') || fetchError.code === 'ERR_NETWORK') {
+          console.log("Netzwerkfehler beim Laden der Tasks - vermutlich offline");
+        } else {
+          // Andere Supabase-Fehler weiterwerfen
+          throw fetchError;
+        }
+      }
+    } catch (err) {
+      console.error("Error loading tasks:", err);
+      // Setze nur einen lokalen Fehler, ohne die Konsole mit weiteren Meldungen zu überfluten
+      // Wenn die Seite neu geladen wird, wird ein neuer Versuch unternommen
+    }
+  };
+
+  const loadProjects = async (
+    userId: string,
+    workspaceId: string | null = null
+  ) => {
+    try {
+      // Offline-Status prüfen
+      if (!navigator.onLine) {
+        console.log("Offline erkannt - Überspringe Laden der Projekte");
+        return; // Früher Abbruch bei fehlender Internetverbindung
+      }
+
+      // Timeout für die Anfrage setzen, um lange hängende Requests zu vermeiden
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 Sekunden Timeout
+
+      try {
+        let query = supabase.from("projects").select("*");
+
+        // Workspace-Filter
+        if (workspaceId) {
+          // Wenn ein Workspace angegeben ist, zeige ALLE Projekte in diesem Workspace
+          // ohne nach user_id zu filtern
+          query = query.eq("workspace_id", workspaceId);
+        } else {
+          // Nur im persönlichen Bereich (ohne Workspace) nach user_id filtern
+          query = query.is("workspace_id", null).eq("user_id", userId);
+        }
+
+        const { data, error } = await query;
+
+        // Timeout aufräumen
+        clearTimeout(timeoutId);
+
+        if (error) throw error;
+
+        if (data) {
+          const formattedProjects = data.map(project => ({
+            ...project,
+            name: project.name || project.title,
+            workspace_id:
+              project.workspace_id || project.preferred_workspace_id || "gpt-4o"
+          }));
+          setProjects(formattedProjects);
+        }
+      } catch (fetchError: any) {
+        // Timeout aufräumen, falls der Fehler vor dem Timeout auftrat
+        clearTimeout(timeoutId);
+        
+        // Prüfe, ob es sich um einen Abbruch-Fehler oder Netzwerkfehler handelt
+        if (fetchError.name === 'AbortError') {
+          console.log("Project-Loading-Anfrage abgebrochen (Timeout)");
+        } else if (fetchError.message?.includes('fetch') || fetchError.code === 'ERR_NETWORK') {
+          console.log("Netzwerkfehler beim Laden der Projekte - vermutlich offline");
+        } else {
+          // Andere Supabase-Fehler weiterwerfen
+          throw fetchError;
+        }
+      }
+    } catch (err) {
+      console.error("Error loading projects:", err);
+      // Setze nur einen lokalen Fehler, ohne die Konsole mit weiteren Meldungen zu überfluten
+    }
+  };
+
+  // Wenn ein user (per Link Sharing) einen spezifischen Chat betritt, dann direkt laden
+  useEffect(() => {
+    // Lade alle verfügbaren Tasks als Optionen
+    if (user) {
+      const workspaceContext = rawWorkspaceId || personalWorkspaceId || null
+      loadTasks(user.id, workspaceContext)
+    }
+
+    // Wenn eine Task-ID in der URL ist, lade diese Task
+    if (taskId) {
+      console.log("Task ID in URL gefunden:", taskId)
+      const fetchTask = async () => {
+        if (!supabase) return
+
+        const { data, error } = await supabase
+          .from("tasks")
+          .select("*")
+          .eq("id", taskId)
+          .single()
+
+        if (error) {
+          console.error("Fehler beim Laden der Task:", error)
+          return
+        }
+
+        if (data) {
+          console.log("Task geladen:", data)
+          setSelectedTask(data)
+          setSelectedModel(data.ai_model || "gpt-4o")
+        }
+      }
+
+      fetchTask()
+    }
+  }, [user, taskId, supabase, rawWorkspaceId, personalWorkspaceId, loadTasks])
+
+  // Effect für die Textareabehandlung
+  useEffect(() => {
+    const textarea = inputRef.current
+    if (textarea) {
+      // Reset height - wichtig, um zu verhindern, dass es nur nach oben wächst
+      textarea.style.height = "auto"
+      // Setze die neue Höhe basierend auf dem Scroll-Höhen-Wert
+      textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
+    }
+  }, [inputValue])
+
+  // Reduziere unnötige Re-Renders durch Memoization der Lade-Funktionen
+  const loadChatSessionsMemoized = useCallback(
+    async (userId: string, workspaceId: string | null = null) => {
+      return await loadChatSessions(userId, workspaceId);
+    },
+    [supabase, setChatSessions]
+  );
+  
+  const loadChatMemoized = useCallback(
+    async (chatId: string) => {
+      return await loadChat(chatId);
+    },
+    [supabase, user, setMessages, setUserNamesMap]
+  );
+  
+  const loadTasksMemoized = useCallback(
+    async (userId: string, workspaceId: string | null = null) => {
+      return await loadTasks(userId, workspaceId);
+    },
+    [supabase, setTasks]
+  );
+  
+  const loadProjectsMemoized = useCallback(
+    async (userId: string, workspaceId: string | null = null) => {
+      return await loadProjects(userId, workspaceId);
+    },
+    [supabase, setProjects]
+  );
+
+  // Haupt-Initialisierungscode für den Chat
+  useEffect(() => {
+    // Zeitsperre, um zu häufige Aufrufe zu verhindern
+    const checkSession = async () => {
+      // Vermeide mehrfache gleichzeitige Initialisierungen
+      if (isInitializingRef.current) {
+        debugLog("Initialization already in progress, skipping");
+        return;
+      }
+      
+      isInitializingRef.current = true;
+      try {
+        setLoading(true);
+
+        // Prüfe, ob der Benutzer angemeldet ist
+        const {
+          data: { session }
+        } = await supabase.auth.getSession();
+
+        if (!session) {
+          console.log("No session found, redirecting to login");
+          router.push("/login");
+          return;
+        }
+
+        // Benutzer ist angemeldet
+        setUser(session.user);
+
+        // Profilnamen laden (nicht kritisch für Initialisierung)
+        if (!userFullName || userFullName === "Du") {
+          try {
+            const { data: profileData } = await supabase
+              .from("profiles")
+              .select("full_name")
+              .eq("id", session.user.id)
+              .single();
+
+            if (profileData?.full_name) {
+              setUserFullName(profileData.full_name);
+            }
+          } catch (profileError) {
+            console.error("Error loading user profile:", profileError);
+          }
+        }
+
+        debugLog(`*** Session exists, user: ${session.user.id}`);
+
+        // Workspace-Kontext bestimmen
+        const workspaceContext = rawWorkspaceId || personalWorkspaceId || null;
+        debugLog("Current workspace context:", workspaceContext);
+
+        // Chats nur laden, wenn nötig
+        if (workspaceContext && !initialChatsLoadedRef.current && chatSessions.length === 0) {
+          debugLog("Loading chat sessions for the first time");
+          // Use Promise.all to load data in parallel
+          await Promise.all([
+            loadChatSessionsMemoized(session.user.id, workspaceContext),
+            loadProjectsMemoized(session.user.id, workspaceContext)
+          ]);
+          initialChatsLoadedRef.current = true;
+        }
+
+        // Wenn ein Chat bereits in state ist, lade ihn
+        if (currentChatId) {
+          debugLog("Chat ID in state bereits vorhanden:", currentChatId);
+          await loadChatMemoized(currentChatId);
+        } else if (chatSessions.length > 0 && !messages.length && !isStartingNewChatRef.current) {
+          // Sonst lade den ersten Chat, aber nur wenn:
+          // - keine Nachrichten bereits geladen sind 
+          // - UND kein expliziter Neustart eines Chats angefordert wurde
+          debugLog("Lade den ersten Chat aus vorhandenen Sessions:", chatSessions[0].id);
+          setCurrentChatId(chatSessions[0].id);
+          await loadChatMemoized(chatSessions[0].id);
+        } else if (isStartingNewChatRef.current) {
+          debugLog("Neuer Chat wurde explizit angefordert - lade keinen vorhandenen Chat");
+          // Flag zurücksetzen nach Verwendung
+          isStartingNewChatRef.current = false;
+        }
+
+        // Tasks laden (wenn noch nicht geladen)
+        if (tasks.length === 0 && workspaceContext) {
+          await loadTasksMemoized(session.user.id, workspaceContext);
+        }
+
+        // Icebreakers zeigen, wenn keine Nachrichten vorhanden
+        if (messages.length === 0) {
+          setShowIceBreakers(true);
+        }
+
+        // Task laden, wenn eine ID übergeben wurde
+        if (taskId && (!selectedTask || selectedTask.id !== taskId)) {
+          const { data: taskData, error } = await supabase
+            .from("tasks")
+            .select("*")
+            .eq("id", taskId)
+            .single();
+
+          if (!error && taskData) {
+            debugLog("Task geladen:", taskData);
+            setSelectedTask(taskData);
+            setSelectedModel(taskData.ai_model || selectedModel);
+          }
+        }
+      } catch (err: any) {
+        console.error("Chat init error:", err);
+        setError(err.message);
+      } finally {
+        setLoading(false);
+        
+        // Use setTimeout to avoid race conditions when setting isInitializingRef
+        if (initializationTimeoutRef.current) {
+          clearTimeout(initializationTimeoutRef.current);
+        }
+        
+        initializationTimeoutRef.current = setTimeout(() => {
+          isInitializingRef.current = false;
+          debugLog("Initialization flag reset to false");
+          initializationTimeoutRef.current = null;
+        }, 100);
+      }
+    };
+
+    checkSession();
+    
+    // Cleanup function
+    return () => {
+      if (initializationTimeoutRef.current) {
+        clearTimeout(initializationTimeoutRef.current);
+      }
+      if (messageUpdateTimeoutRef.current) {
+        clearTimeout(messageUpdateTimeoutRef.current);
+      }
+    };
+  }, [
+    supabase,
+    currentChatId,
+    personalWorkspaceId,
+    rawWorkspaceId,
+    router,
+    taskId
+  ]);
+
+  /* eslint-disable react-hooks/rules-of-hooks */
+  useEffect(() => {
+    if (chatBodyRef.current) {
+      chatBodyRef.current.scrollTop = chatBodyRef.current.scrollHeight
+    }
+  }, [messages])
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        modelDropdownRef.current &&
+        !modelDropdownRef.current.contains(event.target as Node)
+      ) {
+        setShowModelDropdown(false)
+      }
+
+      if (
+        taskDropdownRef.current &&
+        !taskDropdownRef.current.contains(event.target as Node)
+      ) {
+        setShowTaskDropdown(false)
+      }
+
+      // Schließe Chat-Menü bei Klick außerhalb
+      const chatMenuTarget = (event.target as Element)?.closest(
+        "[data-chat-menu]"
+      )
+      if (chatMenuOpen && !chatMenuTarget) {
+        setChatMenuOpen(null)
+      }
+
+      // Schließe Projekt-Menü bei Klick außerhalb
+      const projectMenuTarget = (event.target as Element)?.closest(
+        "[data-project-menu]"
+      )
+      if (projectMenuOpen && !projectMenuTarget) {
+        setProjectMenuOpen(null)
+      }
+    }
+
+    document.addEventListener("mousedown", handleClickOutside)
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside)
+    }
+  }, [chatMenuOpen, projectMenuOpen])
+
+  // Haupt-Funktion zum Senden einer Nachricht an die API
+  const sendMessageToAPI = async (
+    messages: Message[],
+    model: string,
+    chatId: string
+  ) => {
+    console.log(`🔄 sendMessageToAPI v2 aufgerufen mit Chat-ID: ${chatId}`);
+
+    const userId = user?.id;
+    if (!userId) {
+      console.error("❌ User ID fehlt beim Senden an API.");
+      throw new Error("User ID ist erforderlich");
+    }
+
+    // 1. DATEN SAMMELN (wie bisher)
+    // --------------------------------
+    console.log(`👤 Hole Benutzerprofil für User ID: ${userId}`);
+    const { data: fetchedUserProfile, error: profileError } = await supabase
+        .from("profiles")
+        .select("*")
+      .eq("id", userId)
+      .single();
+      
+    // Use fetchedUserProfile instead of the state variable userProfile directly here
+    // to ensure we have the latest data for this specific call.
+    if (profileError) console.error("Fehler beim Abrufen des Profils:", profileError);
+    else console.log("✅ Benutzerprofil erfolgreich abgerufen");
+
+    const lastUserMessage = [...messages].reverse().find(m => m.role === "user");
+    let knowledgeResults: any[] = [];
+    let similarMessages: any[] = []; // Assuming this holds structured QA or relevant snippets
+    // (SelectedTask comes from component state)
+    const currentSelectedTask = selectedTask; // Capture state at the time of call
+
+    if (lastUserMessage) {
+        const userQuery = lastUserMessage.content;
+        
+        // Wissensdatenbank-Suche (falls KB ausgewählt)
+        if (selectedKnowledgeBaseId && selectedKnowledgeBaseId.length > 0) { 
+            try {
+                console.log(`🧠 Performing knowledge base search for KBs: ${selectedKnowledgeBaseId.join(', ')}...`);
+                const { data: authData } = await supabase.auth.getSession();
+                const authToken = authData?.session?.access_token;
+
+                // Alle Ergebnisse aus allen ausgewählten Wissensdatenbanken sammeln
+                let allKnowledgeResults: any[] = [];
+                
+                // Sequentiell durch alle ausgewählten Wissensdatenbanken gehen
+                for (const kbId of selectedKnowledgeBaseId) {
+                    const knowledgeResponse = await fetch("/api/knowledge/search", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            query: userQuery,
+                            knowledge_base_id: kbId,
+                            auth_token: authToken
+                        })
+                    });
+                    
+                    if (knowledgeResponse.ok) {
+                        const knowledgeData = await knowledgeResponse.json();
+                        const results = knowledgeData.results || [];
+                        console.log(`🧠 Found ${results.length} raw knowledge items from KB ${kbId}.`);
+                        allKnowledgeResults.push(...results);
+                    } else {
+                        console.error(`⚠️ Knowledge base search failed for KB ${kbId}:`, knowledgeResponse.statusText);
+                    }
+                }
+                
+                // Sortiere alle Ergebnisse nach Relevanz (falls ein similarity-Feld existiert)
+                knowledgeResults = allKnowledgeResults.sort((a, b) => (b.similarity || 0) - (a.similarity || 0));
+                console.log(`🧠 Combined ${knowledgeResults.length} total knowledge items from all KBs.`);
+          
+            } catch (knowledgeError) {
+                console.error("❌ Error during knowledge base search fetch:", knowledgeError);
+            }
+        } else {
+            console.log("ℹ️ Keine Wissensdatenbank ausgewählt, überspringe Suche.");
+        }
+        
+        // Suche nach ähnlichen Nachrichten (wie bisher)
+        try {
+            console.log(`🔍 Suche nach User-weiten Kontext für User ${userId}, basierend auf: ${userQuery.substring(0, 30)}...`);
+            // Assuming findSimilarMessagesOptimized returns the structured data needed
+            similarMessages = await findSimilarMessagesOptimized(userId, userQuery, lastUserMessage.id) || [];
+            console.log(`✅ ${similarMessages.length} ähnliche Nachrichten gefunden`);
+             // Log details of similar messages structure if needed for debugging
+             // console.log("Similar messages structure:", JSON.stringify(similarMessages.slice(0,2), null, 2));
+        } catch (error) {
+            console.error("❌ Fehler bei der Suche nach ähnlichen Nachrichten:", error);
+        }
+
+    } else {
+      console.warn("Keine letzte Benutzernachricht gefunden, kann keinen Kontext generieren.");
+      // Handle case where there's somehow no user message? Maybe return early or send without context.
+    }
+    
+    // KONSOLIDIERTE PROMPT-ERSTELLUNG MIT DEM NEUEN PROMPT-BUILDER
+    // -------------------------------------------
+    const userInput = lastUserMessage ? lastUserMessage.content : "";
+    
+    // Verwende den neuen buildPrompt statt manueller Zusammensetzung
+    const finalPrompt = buildPrompt({
+      userInput,
+      chatId,
+      taskPrompt: currentSelectedTask?.system_prompt || null,
+      // Verwende den aus prompt-builder.ts importierten DEFAULT_SYSTEM_PROMPT 
+      // Das systemPrompt muss hier nicht explizit übergeben werden, da es den DEFAULT_SYSTEM_PROMPT nutzt
+      userProfile: fetchedUserProfile,
+      knowledgeResults,
+      pastMessages: similarMessages,
+      allMessages: messages,
+      modelType: "default", // Standard-Chat
+      maxPastMessages: 4,
+      maxKnowledgeResults: 3
+    });
+    
+    console.log(`📩 Sende an API: ${messages.filter(m => m.role !== 'system').length} User/Assistant Nachrichten, ${finalPrompt.length - messages.filter(m => m.role !== 'system').length} System/Assistant Kontextobjekt(e)`);
+    console.log("Final apiMessages array (V2) before API call:", JSON.stringify(finalPrompt, null, 2));
+    
+    // API CALL MIT STREAMING
+    // --------------------------------------------------
+    try {
+        const apiUrl = `/api/chat?model=${encodeURIComponent(model)}&chatId=${encodeURIComponent(chatId)}`;
+        
+        // Streaming aktivieren
+        const streaming = true;
+        
+        if (streaming) {
+          // Streaming Anfrage mit benutzerdefinierten Parametern
+          const response = await fetch(apiUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              messages: finalPrompt,
+              streaming: true
+            })
+          });
+          
+          if (!response.ok) {
+            const errorBody = await response.text();
+            console.error("API Error Response Body:", errorBody);
+            throw new Error(`API responded with ${response.status}`);
+          }
+
+          // Stream verarbeiten
+          const reader = response.body?.getReader();
+          if (!reader) throw new Error("Stream reader not available");
+          
+          const decoder = new TextDecoder();
+          let fullContent = "";
+          let metaInfo = null;
+          
+          // Event-basierter Streaming-Modus (gibt Text-Chunks zurück während sie ankommen)
+          return {
+            content: "", // Wird unten schrittweise gefüllt
+            streamContent: async function* () {
+              let buffer = ""; // Puffer für eingehende Chunks
+              const decoder = new TextDecoder();
+              let accumulatedJsonRemainder = ""; // Buffer for incomplete JSON chunks
+
+              try {
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) {
+                    // Yield any remaining buffer content when the stream ends
+                    if (buffer.length > 0) {
+                      yield buffer;
+                      // fullContent is already updated progressively
+                    }
+                     // Yield any remaining JSON remainder if it's valid text
+                    if (accumulatedJsonRemainder.length > 0 && !accumulatedJsonRemainder.startsWith('{')) {
+                       yield accumulatedJsonRemainder;
+                    }
+                    break;
+                  }
+
+                  const rawChunk = decoder.decode(value, { stream: true });
+                  accumulatedJsonRemainder += rawChunk;
+
+                  let textToProcess = "";
+                  let processFromIndex = 0;
+
+                  // Attempt to parse JSON if it looks like it might be JSON
+                  if (accumulatedJsonRemainder.includes('{') && accumulatedJsonRemainder.includes('}')) {
+                      try {
+                          // Find potential JSON boundary more robustly
+                          let potentialJsonEnd = accumulatedJsonRemainder.lastIndexOf('}') + 1;
+                          let potentialJson = accumulatedJsonRemainder.substring(0, potentialJsonEnd);
+                          
+                          // Basic check if it looks like a valid JSON object
+                          if (potentialJson.startsWith('{')) {
+                              const parsed = JSON.parse(potentialJson);
+                              if (parsed && typeof parsed.content === 'string') {
+                                  textToProcess = parsed.content;
+                                  // Update fullContent only with the actual text part
+                                  fullContent += textToProcess;
+                                  // Remove the processed JSON part from the remainder
+                                  accumulatedJsonRemainder = accumulatedJsonRemainder.substring(potentialJsonEnd);
+                                  processFromIndex = 0; // Start processing the new text from beginning
+                              } else {
+                                 // Valid JSON but not the expected format, treat accumulated as text
+                                 textToProcess = accumulatedJsonRemainder;
+                                 fullContent += textToProcess; // Add raw chunk to fullContent
+                                 accumulatedJsonRemainder = ""; // Clear remainder
+                      }
+    } else {
+                             // Doesn't start with '{', treat as raw text
+                             textToProcess = accumulatedJsonRemainder;
+                             fullContent += textToProcess; // Add raw chunk to fullContent
+                             accumulatedJsonRemainder = ""; // Clear remainder
+                        }
+                      } catch (e) {
+                          // Invalid JSON or incomplete chunk, wait for more data or treat as text if stream ends
+                          // Continue accumulating, do not process buffer yet unless it's very long
+                          if (accumulatedJsonRemainder.length > 1000) { // Process as text if buffer gets too long
+                               textToProcess = accumulatedJsonRemainder;
+                               fullContent += textToProcess; // Add raw chunk to fullContent
+                               accumulatedJsonRemainder = ""; // Clear remainder
+                      }
+                    }
+    } else {
+                     // Does not contain braces, likely raw text
+                     textToProcess = accumulatedJsonRemainder;
+                     fullContent += textToProcess; // Add raw chunk to fullContent
+                     accumulatedJsonRemainder = ""; // Clear remainder
+                  }
+                  
+                  // If we extracted text (either from JSON or raw chunk), add to buffer and yield words
+                  if (textToProcess) {
+                    buffer += textToProcess;
+
+                    // Process the buffer to yield whole words/segments
+                    let lastDelimiterPos = -1;
+                    const lastSpacePos = buffer.lastIndexOf(' ');
+                    const lastNewlinePos = buffer.lastIndexOf('\\n');
+                    lastDelimiterPos = Math.max(lastSpacePos, lastNewlinePos);
+
+                    if (lastDelimiterPos !== -1) {
+                      const partToYield = buffer.substring(0, lastDelimiterPos + 1);
+                      if (partToYield.length > 0) {
+                           yield partToYield;
+                      }
+                      buffer = buffer.substring(lastDelimiterPos + 1);
+                    }
+                  }
+                }
+              } catch (error) {
+                console.error("Error reading stream:", error);
+                if (buffer.length > 0) yield buffer;
+                if (accumulatedJsonRemainder.length > 0) yield accumulatedJsonRemainder;
+                throw error;
+              } finally {
+                this.content = fullContent;
+              }
+            },
+            getContent: () => fullContent,
+            model: model
+          };
+        } else {
+          // Nicht-Streaming-Modus (für Fallback)
+      const apiResponse = await fetch(apiUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+              messages: finalPrompt
+        })
+        });
+
+      if (!apiResponse.ok) {
+            // Log response body if available
+            const errorBody = await apiResponse.text();
+            console.error("API Error Response Body:", errorBody);
+            throw new Error(`API responded with ${apiResponse.status}`);
+        }
+
+        const data = await apiResponse.json();
+        return data; // Rückgabe an den Aufrufer (handleSendMessage)
+        }
+    } catch (error) {
+        console.error("❌ Fehler beim API-Aufruf in sendMessageToAPI:", error);
+        throw error; // Fehler weitergeben, damit handleSendMessage ihn fangen kann
+    }
+  }  // Ende von sendMessageToAPI
+
+  const handleTypewriterComplete = (messageId: string) => {
+    const updatedMessages = messages.map(m =>
+      m.id === messageId ? { ...m, isTypewriting: false } : m
+    )
+    setMessages(updatedMessages)
+    setTypingMessageId(null)
+  }
+
+  const handleCreateTask = async () => {
+    if (!newTaskName.trim()) return
+
+    try {
+      setLoading(true)
+
+      const workspaceContext = rawWorkspaceId || null
+
+      const { data, error } = await supabase
+        .from("tasks")
+        .insert({
+          title: newTaskName,
+          description: newTaskDescription,
+          system_prompt: newTaskSystemPrompt,
+          ai_model: newTaskModel,
+          status: "todo",
+          priority: "medium",
+          user_id: user.id,
+          workspace_id: workspaceContext
+        })
+        .select()
+
+      if (error) throw error
+
+      await loadTasks(user.id, workspaceContext)
+
+      setShowTaskModal(false)
+      setNewTaskName("")
+      setNewTaskDescription("")
+      setNewTaskSystemPrompt("")
+      setNewTaskModel("gpt-4o")
+    } catch (err) {
+      console.error("Error creating task:", err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleCreateProject = async () => {
+    if (!newProjectName.trim()) return
+
+    try {
+      setLoading(true)
+
+      const workspaceContext = rawWorkspaceId || personalWorkspaceId || null
+
+      // ---> START DEBUG LOG <---
+      console.log("--- Creating Project --- ")
+      console.log("User ID to send:", user?.id)
+      console.log("Raw Workspace ID from URL:", rawWorkspaceId)
+      console.log("Personal Workspace ID state:", personalWorkspaceId)
+      console.log("Workspace Context to send:", workspaceContext)
+      // ---> END DEBUG LOG <---
+
+      // ---> ADDED AUTH CHECK <---
+      const { data: authData, error: authError } =
+        await supabase.auth.getSession()
+      console.log("--- Auth Check Before Insert ---")
+      console.log("Current Session:", authData?.session)
+      console.log("Session User ID:", authData?.session?.user?.id)
+      console.log("Auth Error:", authError)
+      if (authError || !authData?.session) {
+        console.error("CRITICAL: No valid session before insert!")
+        // Optionally: Prevent the insert or show an error to the user
+        // return;
+      }
+      // ---> END AUTH CHECK <---
+
+      // ---> ADDED DIAGNOSTIC FUNCTION <---
+      // This immediately runs when you click "Create Project" in the UI
+      // It helps diagnose why the workspace membership check fails
+      console.log("--- Running Diagnostic Function ---")
+      const diagResult = await supabase.rpc("diagnose_workspace_membership", {
+        p_user_id: user.id,
+        p_workspace_id: workspaceContext
+      })
+      console.log("Diagnosis Result:", diagResult)
+      // Explicit logging of the important diagnostic data
+      console.log("MEMBERSHIP DATA:", JSON.stringify(diagResult.data, null, 2))
+      if (diagResult.data) {
+        console.log("User ID Input:", diagResult.data.user_id_input)
+        console.log("Workspace ID Input:", diagResult.data.workspace_id_input)
+        console.log("Membership Exists:", diagResult.data.membership_exists)
+        console.log("Membership Count:", diagResult.data.membership_count)
+        console.log("All User Workspaces:", diagResult.data.all_user_workspaces)
+        console.log(
+          "All Workspace Members:",
+          diagResult.data.all_workspace_members
+        )
+      }
+      // ---> END DIAGNOSTIC FUNCTION <---
+
+      // Use the database function instead of direct table access
+      // This bypasses RLS issues while maintaining security checks in the function
+      const { data, error } = await supabase.rpc("create_project", {
+        p_name: newProjectName,
+        p_description: newProjectDescription,
+        p_user_id: user.id,
+        p_workspace_id: workspaceContext,
+        p_color: "#4c4cff",
+        p_status: "active"
+      })
+
+      if (error) throw error
+
+      await loadProjects(user.id, workspaceContext)
+      setShowProjectModal(false)
+      setNewProjectName("")
+      setNewProjectDescription("")
+    } catch (err) {
+      console.error("Error creating project:", err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // Generate a chat name from the first user message
+  const generateChatName = (message: string): string => {
+    // Split the message into words
+    const words = message.trim().split(/\s+/)
+
+    // Get up to the first 3 words
+    const firstThreeWords = words.slice(0, 3).join(" ")
+
+    // If the result is too short, use "Neuer Chat"
+    return firstThreeWords.length >= 3 ? firstThreeWords : "Neuer Chat"
+  }
+
+  // Modifiziere den useEffect für Task-Wechsel
+  useEffect(() => {
+    // Only perform task change operations if no message update is pending
+    // And ensure at least 500ms has passed since the last message update
+    const timeSinceLastUpdate = Date.now() - lastMessageUpdate
+    if (messageUpdatePending || timeSinceLastUpdate < 500) {
+      console.log(
+        "Message update in progress or too recent, deferring task change handling"
+      )
+      return
+    }
+
+    const handleTaskOrModelChange = async () => {
+      // Prüfen, ob es sich um einen Task- oder Modellwechsel handelt
+      const isTaskChange = selectedTask?.id !== previousSelectedTask?.id
+      // const isModelChange = selectedModel !== previousSelectedModel && !selectedTask;
+
+      // Run this logic ONLY on task change, not on simple model selection
+      if (isTaskChange && messages.length > 0) {
+        // Wenn eine Task oder ein Modell gewechselt wurde und es Nachrichten gibt
+
+        console.log("Task wurde gewechselt, erstelle Zusammenfassung...")
+
+        try {
+          // Prüfe, ob bereits eine Zusammenfassung im Chat existiert
+          const lastSummaryMessage = [...messages]
+            .reverse()
+            .find(
+              msg =>
+                msg.role === "assistant" &&
+                (msg.content.includes("Chat-Zusammenfassung") ||
+                  msg.content.includes("Hauptpunkte:") ||
+                  msg.content.includes("Zusammenfassung des Chats"))
+            )
+
+          let summary: string
+
+          if (lastSummaryMessage) {
+            // Verwende die vorhandene Zusammenfassung
+            console.log("Verwende vorhandene Zusammenfassung")
+            summary = lastSummaryMessage.content
+          } else {
+            // Erstelle eine neue Zusammenfassung, da keine vorhanden ist
+            console.log("Überspringe Zusammenfassung für Task-Wechsel (DEBUG)")
+            summary = "" // Temporär deaktiviert
+          }
+
+          if (summary) {
+            // Erstelle eine neue System-Nachricht mit der Zusammenfassung
+            const summarySystemMessage: Message = {
+              id: uuidv4(),
+              role: "system",
+              content: `Zusammenfassung des bisherigen Gesprächs: ${summary}
+
+${selectedTask ? selectedTask.system_prompt : "Fahre mit dem Gespräch fort, basierend auf dieser Zusammenfassung."}`,
+              timestamp: new Date()
+            }
+
+            // Entferne alle bisherigen System-Nachrichten
+            const filteredMessages = messages.filter(m => m.role !== "system")
+
+            // Füge die neue System-Nachricht am Anfang hinzu
+            setMessages([summarySystemMessage, ...filteredMessages])
+
+            console.log(
+              "Zusammenfassung wurde als System-Nachricht hinzugefügt."
+            )
+
+            // Task-switching notification message is REMOVED
+          }
+        } catch (error) {
+          console.error("Error in task change handling:", error)
+        } finally {
+          // Always set isTaskSwitching to false when complete
+          setIsTaskSwitching(false)
+        }
+      } else {
+        // If there's no task change or no messages, just reset the switching state
+        setIsTaskSwitching(false)
+      }
+
+      // Aktuelle Task und Modell für den nächsten Vergleich speichern
+      setPreviousSelectedTask(selectedTask)
+      setPreviousSelectedModel(selectedModel)
+    }
+
+    handleTaskOrModelChange()
+  }, [
+    selectedTask,
+    selectedModel,
+    messages,
+    messageUpdatePending,
+    previousSelectedTask,
+    previousSelectedModel,
+    lastMessageUpdate
+  ])
+
+  // Add this function to sync messages with the database when needed
+  const syncMessagesWithDatabase = async (chatId: string) => {
+    if (!chatId) return
+
+    try {
+      console.log("Syncing messages with database for chat:", chatId)
+      const { data, error } = await supabase
+        .from("chat_messages")
+        .select("*")
+        .eq("chat_id", chatId)
+        .order("created_at", { ascending: true })
+
+      if (error) {
+        console.error("Error syncing messages:", error)
+        return
+      }
+
+      if (data) {
+        // Convert database messages to app message format
+        const formattedMessages: Message[] = data.map(dbMsg => ({
+          id: dbMsg.id || uuidv4(),
+          role: dbMsg.role as "user" | "assistant" | "system",
+          content: dbMsg.content,
+          timestamp: new Date(dbMsg.created_at)
+        }))
+
+        console.log(`Synced ${formattedMessages.length} messages from database`)
+        setMessages(formattedMessages)
+      }
+    } catch (error) {
+      console.error("Error in syncMessagesWithDatabase:", error)
+    }
+  }
+
+  // Modify handleSendMessage to optionally include web search results
+  const handleSendMessage = async (
+    message: string,
+    includeWebSearch: boolean = false
+  ) => {
+    if (message.trim().length === 0) return
+    if (isTyping || messageUpdatePending || isTaskSwitching) return
+
+    // Markieren, dass der Benutzer mit dem Tippen begonnen hat
+    setHasStartedTyping(true)
+
+    const userMessageId = uuidv4()
+    const newMessage: Message = {
+      id: userMessageId,
+      role: "user",
+      content: message,
+      timestamp: new Date(),
+      user_id: user?.id,
+      sentfrom: userFullName
+    }
+
+    console.log("Creating new message with user_id:", user?.id)
+
+    try {
+      // Prevent task switching effects during message sending
+      setMessageUpdatePending(true)
+      setLastMessageUpdate(Date.now())
+
+      // Create the new array *before* setting state
+      const newMessagesArray = [...messages, newMessage]
+
+      // Add user message to state immediately for better UX
+      setMessages(newMessagesArray) // Use the new array
+      setInputValue("") // Eingabefeld leeren
+
+      // Show typing indicator
+      setIsTyping(true)
+
+      // If web search is requested, perform it before sending to API
+      let webSearchResults = null
+      if (includeWebSearch) {
+        setIsSearching(true)
+        try {
+          webSearchResults = await performSerpApiSearch(message)
+          console.log("Web search results:", webSearchResults.length)
+        } catch (searchError) {
+          console.error("Error during web search:", searchError)
+        } finally {
+          setIsSearching(false)
+        }
+      }
+
+      let chatIdToUse = currentChatId
+
+      // If no current chat exists, create a new one before proceeding
+      if (!chatIdToUse) {
+        console.log(
+          "No current chat, creating new one before sending message..."
+        )
+        chatIdToUse = await createNewChat()
+        if (!chatIdToUse) {
+          throw new Error("Failed to create a new chat")
+        }
+        console.log(`Successfully created new chat with ID: ${chatIdToUse}`)
+        // Set current chat ID immediately to ensure context is maintained
+        setCurrentChatId(chatIdToUse)
+      }
+
+      // Speichern der Benutzernachricht in der Datenbank
+      console.log(`Saving message to chat ID: ${chatIdToUse}`)
+
+      // Wichtig: Wir benötigen diese Nachrichts-ID für Embedding
+      let dbMessageId = null;
+
+      try {
+      const { data: messageData, error: messageError } = await retryOperation(
+        async () => {
+          return await supabase
+            .from("chat_messages")
+            .insert({
+              chat_id: chatIdToUse,
+              role: "user",
+                content: message,
+              user_id: user?.id,
+              sentfrom: userFullName,
+              created_at: newMessage.timestamp.toISOString()
+            })
+            .select()
+        },
+        3,
+        1000
+        );
+
+      if (messageError) {
+        console.error("❌ Error saving message:", messageError)
+      } else {
+        console.log("✅ Message saved successfully to database", messageData)
+          // Speichere die ID für spätere Verwendung
+        if (messageData && messageData.length > 0) {
+            dbMessageId = messageData[0].id;
+          }
+        }
+      } catch (saveError) {
+        console.error("Error saving user message:", saveError);
+        // Wir setzen den Prozess fort, auch wenn die Nachricht nicht gespeichert werden konnte
+      }
+
+      // Vorbereiten und Senden der Anfrage an die API
+      try {
+        const modelToUse = selectedTask?.ai_model || selectedModel
+        console.log("📣 Sende Nachricht an API mit Chat-ID:", chatIdToUse)
+        console.log("🔄 Ausgewähltes Modell für diese Anfrage:", modelToUse);
+
+        // Streaming-Response
+        const response = await sendMessageToAPI(
+          newMessagesArray,
+          modelToUse,
+          chatIdToUse
+        )
+
+        // Assistentennachricht erstellen und anzeigen (vorerst leer)
+        const assistantMessageId = uuidv4()
+        const assistantMessage: Message = {
+          id: assistantMessageId,
+          role: "assistant",
+          content: "", // Startinhalt ist leer, wird nach und nach gefüllt
+          timestamp: new Date(),
+          isTypewriting: true // Ensure this is set to true
+        }
+
+        // Calculate whether to show the effect
+        const showEffect = assistantMessage.role === "assistant" && (assistantMessage.isTypewriting || typingMessageId === assistantMessage.id);
+
+        // Modifiziere die AssistentMessage-Creation für mehr Konsistenz
+        const assistantMessage: Message = {
+          id: assistantMessageId,
+          role: "assistant",
+          content: "", // Startinhalt ist leer, wird nach und nach gefüllt
+          timestamp: new Date(),
+          isTypewriting: true // Stelle sicher, dass dies immer auf true gesetzt ist
+        };
+
+        // Add to messages immediately to show the placeholder
+        setMessages(prevMessages => [...prevMessages, assistantMessage])
+        setTypingMessageId(assistantMessageId) // Track the message ID that's being typed
+
+        // Wenn Streaming-Antwort verfügbar ist, nutze diese
+        if (response.streamContent) {

@@ -1,0 +1,24 @@
+{
+  "name": "ai-mitarbeiter",
+  "version": 2,
+  "buildCommand": "npm run build:vercel",
+  "devCommand": "npm run dev",
+  "installCommand": "npm install",
+  "framework": "nextjs",
+  "outputDirectory": ".next",
+  "env": {
+    "NEXT_TELEMETRY_DISABLED": "1",
+    "SKIP_TYPECHECKING": "true",
+    "NEXT_DISABLE_ESLINT": "1"
+  },
+  "functions": {
+    "app/api/knowledge/upload/route.ts": {
+      "memory": 1024,
+      "maxDuration": 60
+    },
+    "app/api/assistants/openai/route.ts": {
+      "memory": 1024,
+      "maxDuration": 60
+    }
+  }
+}

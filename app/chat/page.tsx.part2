@@ -1,0 +1,63 @@
+        if (response.streamContent) {
+          try {
+            console.log("🎬 Starte Streaming-Verarbeitung...");
+            // Sammle Nachrichteninhalt während des Streamings
+            let collectedContent = "";
+            
+            // Hole den Generator für die Stream-Verarbeitung
+            const contentGenerator = response.streamContent();
+            
+            // Schreibe die assistantMessageId in eine konstante Variable
+            // für die asynchronen Funktionen
+            const messageIdToUpdate = assistantMessageId;
+            
+            // Verarbeite jeden Chunk aus dem Stream
+            for await (const chunk of contentGenerator) {
+              // Try to process chunk if it's JSON
+              let processedChunk = chunk;
+              try {
+                if (chunk.trim().startsWith('{') && chunk.trim().endsWith('}')) {
+                  const jsonChunk = JSON.parse(chunk);
+                  if (jsonChunk && typeof jsonChunk.content === 'string') {
+                    processedChunk = jsonChunk.content;
+                  }
+                }
+              } catch (e) {
+                // Use original chunk if JSON parsing fails
+                processedChunk = chunk;
+              }
+              
+              collectedContent += processedChunk;
+              
+              // Aktualisiere die Nachricht in der UI mit jedem Chunk
+              setMessages(prevMessages => 
+                prevMessages.map(msg => 
+                  msg.id === messageIdToUpdate 
+                    ? { ...msg, content: collectedContent, isTypewriting: true }
+                    : msg
+                )
+              );
+            }
+            
+            // Nach Ende des Streams: endgültigen Inhalt speichern
+            assistantMessage.content = collectedContent || response.content;
+            
+            // Aktualisiere mit dem endgültigen Inhalt für den Fall von Metadaten
+            setMessages(prevMessages => 
+              prevMessages.map(msg => 
+                msg.id === messageIdToUpdate 
+                  ? { ...msg, content: assistantMessage.content }
+                  : msg
+              )
+            );
+            
+            console.log("✅ Streaming abgeschlossen, Gesamtlänge:", assistantMessage.content.length);
+          } catch (streamingError) {
+            console.error("❌ Fehler bei der Stream-Verarbeitung:", streamingError);
+            // Fallback: Verwende das content-Feld, wenn verfügbar
+            if (response.content) {
+              assistantMessage.content = response.content;
+              setMessages(prevMessages => 
+                prevMessages.map(msg => 
+                  msg.id === assistantMessageId 
+                    ? { ...msg, content: response.content }

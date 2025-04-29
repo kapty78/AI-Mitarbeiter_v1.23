@@ -1,0 +1,42 @@
+/* components/reveal-effect.css */
+
+.reveal-effect-container {
+  width: 100%;
+  overflow: hidden;
+  contain: content; /* Performance-Optimierung durch Layout-Containment */
+  will-change: opacity; /* Hinweis für Browser-Optimierung */
+}
+
+.reveal-animation-wrapper {
+  animation: fadeIn 0.08s ease-out forwards; /* Kürzere Animation */
+  transform: translateZ(0); /* Hardware-Beschleunigung aktivieren */
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0.85; /* Subtilerer Effekt */
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Optimierte Animation für längere Texte */
+.reveal-effect-container.large-text .reveal-animation-wrapper {
+  animation-duration: 0.05s; /* Noch schneller für lange Texte */
+}
+
+/* Additional styling for better Markdown appearance during reveal */
+.reveal-effect-container h1,
+.reveal-effect-container h2,
+.reveal-effect-container h3,
+.reveal-effect-container h4,
+.reveal-effect-container ol,
+.reveal-effect-container ul {
+  margin: revert;
+  padding: revert;
+}
+
+.reveal-effect-container li {
+  list-style: revert;
+} 

@@ -1,0 +1,1 @@
+CREATE OR REPLACE FUNCTION delete_chat_with_messages(chat_id_param UUID, user_id_param UUID) RETURNS void AS \$\$ BEGIN DELETE FROM chat_messages WHERE chat_id = chat_id_param; DELETE FROM chats WHERE id = chat_id_param AND user_id = user_id_param; END; \$\$ LANGUAGE plpgsql;
