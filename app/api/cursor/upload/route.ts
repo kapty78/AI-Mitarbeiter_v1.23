@@ -11,7 +11,7 @@ import { generateEmbeddings } from '@/lib/knowledge-base/embedding'
 // }; // Remove this deprecated config
 
 export const dynamic = 'force-dynamic'; // Prevent static generation
-export const maxDuration = 300; // Increase timeout to 5 minutes for large files
+export const maxDuration = 60; // Increase timeout to 5 minutes for large files
 
 // Initialisiere OpenAI-Client
 const openai = new OpenAI({
